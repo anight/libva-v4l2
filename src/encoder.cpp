@@ -3,6 +3,8 @@
 #include <linux/videodev2.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <glob.h>
@@ -187,6 +189,30 @@ void validate(const EncodeSettings &s, const EncodePicture &p, unsigned width, u
               "invalid encode bitrate", VA_STATUS_ERROR_INVALID_PARAMETER);
 }
 } // namespace
+
+// Whether the V4L2 device behind fd is DMA-coherent: the device tree's
+// "dma-coherent" property on it or one of its parents. A GPU that can allocate
+// cached-coherent GEM says nothing about the video block: on SC8180X the GPU
+// snoops CPU caches but the video codec does not, so cached-coherent buffers
+// it reads directly may still hold CPU writes only in the CPU caches.
+static bool device_dma_coherent(int fd) {
+    struct stat st{};
+    if (fstat(fd, &st) < 0 || !S_ISCHR(st.st_mode))
+        return false;
+    std::string link = "/sys/dev/char/" + std::to_string(major(st.st_rdev)) + ":" +
+                       std::to_string(minor(st.st_rdev)) + "/device";
+    char *resolved = realpath(link.c_str(), nullptr);
+    if (!resolved)
+        return false;
+    std::string path = resolved;
+    free(resolved);
+    while (path.size() > 1) {
+        if (!access((path + "/of_node/dma-coherent").c_str(), F_OK))
+            return true;
+        path.erase(path.rfind('/'));
+    }
+    return false;
+}
 
 std::string find_encoder_device() {
     std::vector<std::string> paths;
@@ -588,9 +614,12 @@ Encoder::Encoder(const std::string &device, unsigned width, unsigned height, VAP
     int probe = irisva_msm_allocate(e.render_fd, 4096, &coherent);
     check(probe >= 0, "probe encoder shared memory", VA_STATUS_ERROR_ALLOCATION_FAILED);
     close(probe);
-    e.import = coherent;
     e.fd = open(device.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
     check(e.fd >= 0, "open Iris encoder");
+    // Import GEM directly only into a coherent video device; otherwise copy
+    // into its MMAP buffers, which the kernel cleans from the caches at QBUF.
+    e.import = coherent && device_dma_coherent(e.fd);
+    trace("encoder input import=%d (GEM coherent=%d)", e.import, coherent);
     v4l2_format fmt{};
     fmt.type = CAPTURE;
     fmt.fmt.pix_mp.width = width;
