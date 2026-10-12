@@ -205,8 +205,11 @@ std::string find_encoder_device() {
             continue;
         v4l2_capability cap{};
         bool match = false;
+        // "qcom-venus" (SC8180X and earlier) has the same stateful encoder
+        // interface as "iris_driver"; see find_device() in decoder.cpp.
         if (!call(fd, VIDIOC_QUERYCAP, &cap) &&
-            !strcmp(reinterpret_cast<char *>(cap.driver), "iris_driver") &&
+            (!strcmp(reinterpret_cast<char *>(cap.driver), "iris_driver") ||
+             !strcmp(reinterpret_cast<char *>(cap.driver), "qcom-venus")) &&
             (cap.device_caps & V4L2_CAP_VIDEO_M2M_MPLANE)) {
             v4l2_fmtdesc fmt{};
             fmt.type = CAPTURE;
