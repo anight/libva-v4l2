@@ -687,6 +687,10 @@ Encoder::Encoder(const std::string &device, unsigned width, unsigned height, VAP
     fmt.fmt.pix_mp.height = height;
     fmt.fmt.pix_mp.pixelformat = s.hevc ? V4L2_PIX_FMT_HEVC : V4L2_PIX_FMT_H264;
     checked(e.fd, VIDIOC_S_FMT, &fmt, "encoder refresh CAPTURE format");
+    // venus (SC8180X) resets the visible rectangle to the aligned format on
+    // every S_FMT; set the crop again so the stream keeps the requested size.
+    crop.r = {0, 0, width, height};
+    checked(e.fd, VIDIOC_S_SELECTION, &crop, "encoder S_SELECTION after refresh");
     for (unsigned type : {OUTPUT, CAPTURE}) {
         v4l2_requestbuffers req{};
         req.type = type;
