@@ -670,6 +670,13 @@ Encoder::Encoder(const std::string &device, unsigned width, unsigned height, VAP
         parm.type = type;
         parm.parm.output.timeperframe.numerator = s.fps_den;
         parm.parm.output.timeperframe.denominator = s.fps_num;
+        // The coded (CAPTURE) frame interval is optional in the V4L2 encoder
+        // interface; venus (SC8180X) takes the frame rate on OUTPUT only.
+        if (type == CAPTURE) {
+            if (call(e.fd, VIDIOC_S_PARM, &parm) < 0)
+                check(errno == EINVAL, "encoder S_PARM CAPTURE", VA_STATUS_ERROR_ENCODING_ERROR);
+            continue;
+        }
         checked(e.fd, VIDIOC_S_PARM, &parm, "encoder S_PARM");
     }
     // Iris sizes coded buffers differently when rate control is disabled.
