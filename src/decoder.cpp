@@ -71,8 +71,12 @@ std::string find_device() {
             continue;
         v4l2_capability cap{};
         bool match = false;
+        // "qcom-venus" is the older kernel driver for the same hardware family
+        // (SC8180X and earlier); it implements the same stateful interface and
+        // the display-delay controls used for decode-order output.
         if (!call(fd, VIDIOC_QUERYCAP, &cap) &&
-            !strcmp(reinterpret_cast<char *>(cap.driver), "iris_driver")) {
+            (!strcmp(reinterpret_cast<char *>(cap.driver), "iris_driver") ||
+             !strcmp(reinterpret_cast<char *>(cap.driver), "qcom-venus"))) {
             unsigned caps =
                 cap.capabilities & V4L2_CAP_DEVICE_CAPS ? cap.device_caps : cap.capabilities;
             if (caps & V4L2_CAP_VIDEO_M2M_MPLANE) {
