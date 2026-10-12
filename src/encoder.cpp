@@ -644,7 +644,16 @@ Encoder::Encoder(const std::string &device, unsigned width, unsigned height, VAP
     // Keyframes follow VA picture requests; prevent autonomous periodic IDRs.
     e.control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, std::numeric_limits<int>::max());
     e.control(V4L2_CID_MPEG_VIDEO_HEADER_MODE, V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME);
-    e.control(V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR, 1);
+    // venus (SC8180X) has no PREPEND_SPSPPS_TO_IDR control: with the joined
+    // header mode set above it already puts SPS/PPS before every IDR frame
+    // (HFI SYNC_FRAME_SEQUENCE_HEADER). Set the control where it exists.
+    v4l2_queryctrl prepend{};
+    prepend.id = V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR;
+    if (call(e.fd, VIDIOC_QUERYCTRL, &prepend) == 0)
+        e.control(V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR, 1);
+    else
+        check(errno == EINVAL, "query encoder PREPEND_SPSPPS_TO_IDR",
+              VA_STATUS_ERROR_ENCODING_ERROR);
     e.control(V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE, s.rate_control != VA_RC_CQP);
     if (s.rate_control != VA_RC_CQP) {
         e.control(V4L2_CID_MPEG_VIDEO_BITRATE_MODE, s.rate_control == VA_RC_CBR
