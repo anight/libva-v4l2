@@ -252,6 +252,14 @@ std::string find_encoder_device() {
     return {};
 }
 
+// Rate estimators (WebRTC) can report a few hundred frames per second for a
+// burst of frames; encode at the highest rate the encoders take instead.
+static void limit_frame_rate(EncodeSettings &s) {
+    if (s.fps_den && uint64_t(s.fps_num) > uint64_t(s.fps_den) * 240) {
+        s.fps_num = 240;
+        s.fps_den = 1;
+    }
+}
 void render_encode_buffer(EncodeSettings &s, EncodePicture &p, const Buffer &b) {
     switch (b.type) {
     case VAEncSequenceParameterBufferType:
@@ -263,6 +271,7 @@ void render_encode_buffer(EncodeSettings &s, EncodePicture &p, const Buffer &b) 
                 seq.vui_fields.bits.vui_timing_info_present_flag) {
                 s.fps_num = seq.vui_time_scale;
                 s.fps_den = seq.vui_num_units_in_tick;
+                limit_frame_rate(s);
             }
             if (!s.bitrate)
                 s.bitrate = s.peak_bitrate = seq.bits_per_second;
@@ -276,6 +285,7 @@ void render_encode_buffer(EncodeSettings &s, EncodePicture &p, const Buffer &b) 
                   "invalid encoder timing", VA_STATUS_ERROR_INVALID_PARAMETER);
             s.fps_num = s.sequence.time_scale;
             s.fps_den = s.sequence.num_units_in_tick * 2;
+            limit_frame_rate(s);
         }
         if (!s.bitrate)
             s.bitrate = s.peak_bitrate = s.sequence.bits_per_second;
@@ -332,6 +342,7 @@ void render_encode_buffer(EncodeSettings &s, EncodePicture &p, const Buffer &b) 
                   VA_STATUS_ERROR_UNIMPLEMENTED);
             s.fps_num = fr.framerate & 0xffff;
             s.fps_den = std::max(1u, fr.framerate >> 16);
+            limit_frame_rate(s);
             break;
         }
         case VAEncMiscParameterTypeQualityLevel: {
@@ -790,10 +801,28 @@ std::shared_ptr<EncodeTask> Encoder::encode(const EncodeSettings &s, const Encod
                      s.hevc_sequence.general_tier_flag == e.settings.hevc_sequence.general_tier_flag
                : s.sequence.level_idc == e.settings.sequence.level_idc &&
                      p.params.pic_fields.bits.entropy_coding_mode_flag == e.entropy) &&
-              s.fps_num == e.settings.fps_num && s.fps_den == e.settings.fps_den &&
-              s.bitrate == e.settings.bitrate && s.peak_bitrate == e.settings.peak_bitrate &&
               s.min_qp == e.settings.min_qp && s.max_qp == e.settings.max_qp,
           "changing encoder settings requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
+    // Real-time clients (WebRTC) adjust the bitrate continuously. The V4L2
+    // bitrate controls may change while streaming; apply them.
+    if (s.rate_control != VA_RC_CQP &&
+        (s.bitrate != e.settings.bitrate || s.peak_bitrate != e.settings.peak_bitrate)) {
+        // Raise the peak before the target, lower it after, so that the
+        // target never exceeds the peak in between.
+        if (s.peak_bitrate >= e.settings.peak_bitrate)
+            e.control(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, s.peak_bitrate);
+        e.control(V4L2_CID_MPEG_VIDEO_BITRATE, s.bitrate);
+        if (s.peak_bitrate < e.settings.peak_bitrate)
+            e.control(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, s.peak_bitrate);
+        e.settings.bitrate = s.bitrate;
+        e.settings.peak_bitrate = s.peak_bitrate;
+    }
+    // The V4L2 encoder interface sets the frame rate before streaming and
+    // defines no change while streaming (venus only records it then); keep
+    // the starting rate.
+    if (s.fps_num != e.settings.fps_num || s.fps_den != e.settings.fps_den)
+        trace("encoder frame rate %u/%u requested, keeping %u/%u", s.fps_num, s.fps_den,
+              e.settings.fps_num, e.settings.fps_den);
     const bool idr =
         s.hevc ? p.hevc_params.pic_fields.bits.idr_pic_flag : p.params.pic_fields.bits.idr_pic_flag;
     const bool intra =
