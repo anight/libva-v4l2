@@ -532,9 +532,16 @@ API(create_context,
               VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED);
     for (int i = 0; i < count; ++i) surface(d, targets[i]); c->width = w; c->height = h;
     int render_fd = ctx->drm_state ? static_cast<drm_state *>(ctx->drm_state)->fd : -1;
+    // VLC creates its whole surface pool first and then a context with no
+    // render targets. Count that pool here, so that a pool the kernel driver
+    // cannot back is refused now, while the client can still pick another
+    // decoder, rather than at its first picture.
+    unsigned pool = std::max(0, count);
+    for (auto &entry : d.surfaces) if (int(entry.second->width) == w &&
+                                       int(entry.second->height) == h)
+        pool = std::max(pool, entry.second->allocation_count);
     if (c->entrypoint == VAEntrypointVLD)
-        c->decoder = std::make_shared<Decoder>(d.device, w, h, std::max(0, count), c->profile,
-                                               render_fd);
+        c->decoder = std::make_shared<Decoder>(d.device, w, h, pool, c->profile, render_fd);
     if (processing) c->vpp = std::make_unique<Vpp>(); *result = d.next_id++;
     d.contexts[*result] = c; return VA_STATUS_SUCCESS;)
 API(

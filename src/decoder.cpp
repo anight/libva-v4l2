@@ -124,6 +124,20 @@ Decoder::Decoder(const std::string &device, unsigned width, unsigned height, uns
         delay.id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE;
         delay.value = 1;
         checked(fd_, VIDIOC_S_CTRL, &delay, "S_CTRL DISPLAY_DELAY_ENABLE");
+        // A kernel driver without the larger-pool change (venus, unpatched
+        // iris) stops at vb2's 32 CAPTURE buffers. A renderer that brings more
+        // surfaces than that (VLC with frame threading) would only find out at
+        // its first picture, too late to fall back to another decoder, so
+        // refuse the context here.
+        v4l2_create_buffers probe{};
+        probe.format.type = CAPTURE;
+        probe.memory = V4L2_MEMORY_MMAP;
+        unsigned limit = 32;
+        if (!call(fd_, VIDIOC_CREATE_BUFS, &probe) &&
+            (probe.capabilities & V4L2_BUF_CAP_SUPPORTS_MAX_NUM_BUFFERS) && probe.max_num_buffers)
+            limit = probe.max_num_buffers;
+        check(pool_size_ <= limit, "more surfaces than the kernel driver's CAPTURE queue holds",
+              VA_STATUS_ERROR_ALLOCATION_FAILED);
         allocate(OUTPUT, 4, output_);
         unsigned type = OUTPUT;
         checked(fd_, VIDIOC_STREAMON, &type, "STREAMON OUTPUT");
