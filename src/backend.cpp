@@ -373,6 +373,7 @@ API(
         values[2] = 2;
         values[5] |= VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2;
     } if (config.entrypoint == VAEntrypointEncSlice) {
+        values[5] |= VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME | VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2;
         values[3] = 3840;
         values[4] = 2160;
     } for (unsigned i = 0; i < 6; ++i) {
@@ -442,6 +443,35 @@ static std::shared_ptr<Memory> import_prime(const VADRMPRIMESurfaceDescriptor &d
     m->origin = MemoryOrigin::Imported;
     return m;
 }
+// The older DRM PRIME import (Chromium's VA-API encoder uses it): one DMA-BUF
+// and the plane pitches/offsets, always linear. Described as PRIME2 for
+// import_prime().
+static VADRMPRIMESurfaceDescriptor prime_from_external(const VASurfaceAttribExternalBuffers &b) {
+    check(b.pixel_format == VA_FOURCC_NV12 && b.num_planes == 2 && b.num_buffers == 1 &&
+              b.buffers && !b.flags,
+          "legacy PRIME import requires one NV12 DMA-BUF", VA_STATUS_ERROR_INVALID_PARAMETER);
+    VADRMPRIMESurfaceDescriptor desc{};
+    desc.fourcc = VA_FOURCC_NV12;
+    desc.width = b.width;
+    desc.height = b.height;
+    desc.num_objects = 1;
+    desc.objects[0].fd = int(b.buffers[0]);
+    desc.objects[0].size = b.data_size;
+    if (!desc.objects[0].size && desc.objects[0].fd >= 0) {
+        auto size = lseek(desc.objects[0].fd, 0, SEEK_END);
+        check(size > 0, "DMA-BUF size", VA_STATUS_ERROR_INVALID_PARAMETER);
+        desc.objects[0].size = uint32_t(size);
+    }
+    desc.objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
+    desc.num_layers = 1;
+    desc.layers[0].drm_format = DRM_FORMAT_NV12;
+    desc.layers[0].num_planes = 2;
+    for (unsigned i = 0; i < 2; ++i) {
+        desc.layers[0].offset[i] = b.offsets[i];
+        desc.layers[0].pitch[i] = b.pitches[i];
+    }
+    return desc;
+}
 API(
     create_surfaces,
     (VADriverContextP ctx, unsigned format, unsigned w, unsigned h, VASurfaceID *ids,
@@ -451,9 +481,8 @@ API(
     check(w && h && w <= 8192 && h <= 8192 && ids && count <= 256, "invalid surfaces",
           VA_STATUS_ERROR_INVALID_PARAMETER);
     check(!nattrs || attrs, "null surface attributes", VA_STATUS_ERROR_INVALID_PARAMETER);
-    unsigned memory_type = VA_SURFACE_ATTRIB_MEM_TYPE_VA;
-    const VADRMPRIMESurfaceDescriptor *external = nullptr; bool explicit_modifier = false;
-    for (unsigned i = 0; i < nattrs; ++i) {
+    unsigned memory_type = VA_SURFACE_ATTRIB_MEM_TYPE_VA; const void *external = nullptr;
+    bool explicit_modifier = false; for (unsigned i = 0; i < nattrs; ++i) {
         if (!(attrs[i].flags & VA_SURFACE_ATTRIB_SETTABLE))
             continue;
 #if VA_CHECK_VERSION(1, 13, 0)
@@ -474,7 +503,7 @@ API(
         if (attrs[i].type == VASurfaceAttribExternalBufferDescriptor) {
             check(attrs[i].value.type == VAGenericValueTypePointer && attrs[i].value.value.p,
                   "invalid external descriptor", VA_STATUS_ERROR_INVALID_PARAMETER);
-            external = static_cast<const VADRMPRIMESurfaceDescriptor *>(attrs[i].value.value.p);
+            external = attrs[i].value.value.p;
             continue;
         }
         check(attrs[i].value.type == VAGenericValueTypeInteger, "unsupported surface attribute",
@@ -489,14 +518,20 @@ API(
         else if (attrs[i].type != VASurfaceAttribUsageHint)
             throw Error(VA_STATUS_ERROR_ATTR_NOT_SUPPORTED, "unsupported surface attribute");
     } check(memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_VA ||
+                memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME ||
                 memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
             "unsupported surface memory type", VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE);
-    std::shared_ptr<Memory> imported; if (memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) {
+    std::shared_ptr<Memory> imported; if (memory_type != VA_SURFACE_ATTRIB_MEM_TYPE_VA) {
         check(external && !explicit_modifier && count == 1 && format == VA_RT_FORMAT_YUV420,
-              "PRIME2 import requires one NV12 descriptor/surface",
+              "PRIME import requires one NV12 descriptor/surface",
               VA_STATUS_ERROR_INVALID_PARAMETER);
-        imported = import_prime(*external, w, h);
-    } else check(!external, "external descriptor without PRIME2 memory type",
+        imported =
+            import_prime(memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2
+                             ? *static_cast<const VADRMPRIMESurfaceDescriptor *>(external)
+                             : prime_from_external(
+                                   *static_cast<const VASurfaceAttribExternalBuffers *>(external)),
+                         w, h);
+    } else check(!external, "external descriptor without PRIME memory type",
                  VA_STATUS_ERROR_INVALID_PARAMETER);
     for (unsigned i = 0; i < count; ++i) {
         auto s = std::make_shared<Surface>();
