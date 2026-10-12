@@ -122,7 +122,10 @@ static unsigned encode_attribute(VAConfigAttribType type, VAProfile profile) {
     case VAConfigAttribRTFormat:
         return VA_RT_FORMAT_YUV420;
     case VAConfigAttribRateControl:
-        return VA_RC_CQP | VA_RC_CBR | VA_RC_VBR;
+        // The SC8180X (venus) encoder takes CBR only: its firmware faults in
+        // the VBR path, and the kernel driver refuses VBR and CQP. Offer only
+        // CBR so that clients choose it rather than fail.
+        return VA_RC_CBR;
     case VAConfigAttribEncPackedHeaders:
         return VA_ENC_PACKED_HEADER_NONE;
     case VAConfigAttribEncInterlaced:
@@ -320,7 +323,8 @@ API(
     check((supported(p) && e == VAEntrypointVLD) || vpp_supported(p, e) ||
               encode_supported(d, p, e),
           "unsupported entrypoint", VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT);
-    Config config{p, e, VA_RC_CQP}; check(id, "null config ID", VA_STATUS_ERROR_INVALID_PARAMETER);
+    Config config{p, e, unsigned(e == VAEntrypointEncSlice ? VA_RC_CBR : VA_RC_CQP)};
+    check(id, "null config ID", VA_STATUS_ERROR_INVALID_PARAMETER);
     for (int i = 0; i < count; ++i) {
         if (e == VAEntrypointEncSlice) {
             const auto type = attrs[i].type;
